@@ -77,6 +77,10 @@ struct host {
     AvahiAddress address;
     uint16_t port;
     int n_cpus;
+    struct {
+        int cpp: 1;
+        int lzo: 1;
+    } options;
 
     AvahiServiceResolver *resolver;
 };
@@ -157,15 +161,22 @@ static int write_hosts(struct daemon_data *d) {
     remove_duplicate_services(d);
 
     for (h = d->hosts; h; h = h->next) {
-        char t[256], a[AVAHI_ADDRESS_STR_MAX];
+        char t[256], options[sizeof(",cpp,lzo")], a[AVAHI_ADDRESS_STR_MAX];
 
         if (h->resolver)
             /* Not yet fully resolved */
             continue;
-	if (h->address.proto == AVAHI_PROTO_INET6)
-	    snprintf(t, sizeof(t), "[%s]:%u/%i\n", avahi_address_snprint(a, sizeof(a), &h->address), h->port, d->n_slots * h->n_cpus);
-	else
-	    snprintf(t, sizeof(t), "%s:%u/%i\n", avahi_address_snprint(a, sizeof(a), &h->address), h->port, d->n_slots * h->n_cpus);
+
+        options[0] = '\0';
+        if (h->options.cpp)
+            strcat(options, ",cpp");
+        if (h->options.lzo)
+            strcat(options, ",lzo");
+
+        if (h->address.proto == AVAHI_PROTO_INET6)
+            snprintf(t, sizeof(t), "[%s]:%u/%i%s\n", avahi_address_snprint(a, sizeof(a), &h->address), h->port, d->n_slots * h->n_cpus, options);
+        else
+            snprintf(t, sizeof(t), "%s:%u/%i%s\n", avahi_address_snprint(a, sizeof(a), &h->address), h->port, d->n_slots * h->n_cpus, options);
 
         if (dcc_writex(d->fd, t, strlen(t)) != 0) {
             rs_log_crit("write() failed: %s\n", strerror(errno));
@@ -180,7 +191,7 @@ finish:
     generic_lock(d->fd, 1, 0, 1);
     return r;
 
-};
+}
 
 /* Free host data */
 static void free_host(struct host *h) {
@@ -268,9 +279,15 @@ static void resolve_reply(
                 if (avahi_string_list_get_pair(i, &key, &value, NULL) < 0)
                     continue;
 
-                if (!strcmp(key, "cpus"))
+                if (!strcmp(key, "cpus")) {
                     if ((h->n_cpus = atoi(value)) <= 0)
                         h->n_cpus = 1;
+                } else if (!strcmp(key, "options")) {
+                    if (strstr(value, "cpp"))
+                        h->options.cpp = 1;
+                    if (strstr(value, "lzo"))
+                        h->options.lzo = 1;
+                }
 
                 avahi_free(key);
                 avahi_free(value);
@@ -350,6 +367,8 @@ static void browse_reply(
                 h->protocol = protocol;
                 h->next = d->hosts;
                 h->n_cpus = 1;
+                h->options.cpp = 0;
+                h->options.lzo = 0;
                 d->hosts = h;
             }
 
