@@ -1839,7 +1839,7 @@ class SyntaxError_Case(Compilation_Case):
         rc, msgs, errs = self.runcmd_unchecked(self.compileCmd())
         self.assert_notequal(rc, 0)
         # XXX: Need to also handle "syntax error" from gcc-2.95.3
-        self.assert_re_match(r'testtmp.c:1: .*error', errs)
+        self.assert_re_match(r'testtmp.c:1:.*error', errs)
         self.assert_equal(msgs, '')
 
     def runtest(self):
