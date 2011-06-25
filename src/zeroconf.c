@@ -44,6 +44,7 @@
 #include "distcc.h"
 #include "hosts.h"
 #include "zeroconf.h"
+#include "util.h"
 #include "trace.h"
 #include "exitcode.h"
 
@@ -58,6 +59,8 @@ struct daemon_data {
     struct host *hosts;
     int fd;
     int n_slots;
+    enum dcc_cpp_where honor_cpp;
+    enum dcc_compress honor_lzo;
 
     AvahiClient *client;
     AvahiServiceBrowser *browser;
@@ -283,10 +286,16 @@ static void resolve_reply(
                     if ((h->n_cpus = atoi(value)) <= 0)
                         h->n_cpus = 1;
                 } else if (!strcmp(key, "options")) {
-                    if (strstr(value, "cpp"))
+                    if (h->daemon_data->honor_cpp == DCC_CPP_ON_SERVER &&
+                        strstr(value, "cpp")) {
+
                         h->options.cpp = 1;
-                    if (strstr(value, "lzo"))
+                    }
+                    if (h->daemon_data->honor_lzo == DCC_COMPRESS_LZO1X &&
+                        strstr(value, "lzo")) {
+
                         h->options.lzo = 1;
+                    }
                 }
 
                 avahi_free(key);
@@ -416,7 +425,7 @@ static void client_callback(AvahiClient *client, AvahiClientState state, void *u
 }
 
 /* The main function of the background daemon */
-static int daemon_proc(const char *host_file, const char *lock_file, int n_slots) {
+static int daemon_proc(const char *host_file, const char *lock_file, int n_slots, enum dcc_cpp_where honor_cpp, enum dcc_compress honor_lzo) {
     int ret = 1;
     int lock_fd = -1;
     struct daemon_data d;
@@ -433,6 +442,8 @@ static int daemon_proc(const char *host_file, const char *lock_file, int n_slots
     d.simple_poll = NULL;
     d.browser = NULL;
     d.client = NULL;
+    d.honor_cpp = honor_cpp;
+    d.honor_lzo = honor_lzo;
     clip_time = time(NULL);
 
     rs_log_info("Zeroconf daemon running.\n");
@@ -557,14 +568,62 @@ static int get_zeroconf_dir(char **dir_ret) {
     }
 }
 
+/**
+ * Parse an optionally present zeroconf option string.
+ *
+ * At the moment the only two options we handle is "lzo" and "cpp".
+ **/
+static int dcc_zeroconf_parse_options(const char *p,
+                               enum dcc_cpp_where * ret_honor_cpp,
+                               enum dcc_compress * ret_honor_lzo)
+{
+    const char *started = p;
+    enum dcc_protover protocol_version = DCC_VER_1;
+
+    *ret_honor_cpp = DCC_CPP_ON_CLIENT;
+    *ret_honor_lzo = DCC_COMPRESS_NONE;
+
+    while (p[0] == ',') {
+        p++;
+        if (str_startswith("lzo", p)) {
+            rs_trace("honoring zeroconf LZO option");
+            *ret_honor_lzo = DCC_COMPRESS_LZO1X;
+            p += 3;
+        } else if (str_startswith("cpp", p)) {
+            rs_trace("honoring zeroconf CPP option");
+            *ret_honor_cpp = DCC_CPP_ON_SERVER;
+            p += 3;
+        } else {
+            rs_log_error("unrecognized option in zeroconf specification: %s",
+                         started);
+            return EXIT_BAD_HOSTSPEC;
+        }
+    }
+    if (dcc_get_protover_from_features(*ret_honor_lzo, *ret_honor_cpp,
+                                       &protocol_version) == -1) {
+        rs_log_error("invalid zeroconf options: %s", started);
+        return EXIT_BAD_HOSTSPEC;
+    }
+
+    return 0;
+}
+
 /* Get the host list from zeroconf */
-int dcc_zeroconf_add_hosts(struct dcc_hostdef **ret_list, int *ret_nhosts, int n_slots, struct dcc_hostdef **ret_prev) {
+int dcc_zeroconf_add_hosts(struct dcc_hostdef **ret_list, int *ret_nhosts, int n_slots, struct dcc_hostdef **ret_prev, const char * const token_start) {
     char host_file[PATH_MAX], lock_file[PATH_MAX], *s = NULL;
     int lock_fd = -1, host_fd = -1;
     int fork_daemon = 0;
     int r = -1;
     char *dir;
     struct stat st;
+
+    const char * token = token_start + sizeof(ZEROCONF_MAGIC) - 1;
+
+    enum dcc_cpp_where honor_cpp;
+    enum dcc_compress honor_lzo;
+
+    if ((r = dcc_zeroconf_parse_options(token, &honor_cpp, &honor_lzo)) != 0)
+        return r;
 
     if (get_zeroconf_dir(&dir) != 0) {
         rs_log_crit("failed to get zeroconf dir.\n");
@@ -619,7 +678,7 @@ int dcc_zeroconf_add_hosts(struct dcc_hostdef **ret_list, int *ret_nhosts, int n
 
             chdir("/");
             rs_add_logger(rs_logger_syslog, RS_LOG_DEBUG, NULL, 0);
-            _exit(daemon_proc(host_file, lock_file, n_slots));
+            _exit(daemon_proc(host_file, lock_file, n_slots, honor_cpp, honor_lzo));
         }
 
         /* Parent */
